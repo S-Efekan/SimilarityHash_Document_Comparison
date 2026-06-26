@@ -1,8 +1,8 @@
 """
 Doküman Benzerlik Karşılaştırıcı
 ========================================================================
-1) TEXT EXTRACTION : PDF'ten metin çıkarma (pypdf — unpdf'in mergePages
-                     davranışının Python karşılığı).
+1) TEXT EXTRACTION : PDF'ten metin çıkarma (pypdf) ve XLSX'ten metin
+                     çıkarma (openpyxl).  Dosya uzantısına göre otomatik seçim.
 2) TOKENIZER       : Sayısal-değer koruyan özel tokenizer'ı.
 3) SHINGLE (n-gram): Tek kelimeler yerine ardışık kelime grupları kullanılır.
                      SEBEP: tek kelime çok kaba bir birim; aynı dildeki iki uzun
@@ -15,8 +15,9 @@ Doküman Benzerlik Karşılaştırıcı
                      parçaları eşleştirip ortalamasını alır.
 
 Kullanım:
-    python3 document_similarity.py                       # comp1.pdf vs comp2.pdf
-    python3 document_similarity.py rapor_a.pdf rapor_b.pdf
+    python3 comp.py rapor_a.pdf rapor_b.pdf
+    python3 comp.py tablo_a.xlsx tablo_b.xlsx
+    python3 comp.py rapor_a.pdf tablo_b.xlsx   # karışık format da desteklenir
 """
 
 import sys
@@ -25,16 +26,16 @@ import re
 import hashlib
 import time
 
-# 0. TEXT EXTRACTION — unpdf'in extractFromPdf davranışının Python karşılığı
+# 0. TEXT EXTRACTION
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 
 def extract_from_pdf(path: str) -> dict:
-    """PDF'ten metin çıkarır (mergePages: true -> tüm sayfalar birleştirilir)."""
+    """PDF'ten metin çıkarır (tüm sayfalar birleştirilir)."""
     try:
         from pypdf import PdfReader
     except ImportError:
-        return {"success": False, "error": "pypdf kurulu değil: python3 -m pip install pypdf"}
+        return {"success": False, "error": "pypdf kurulu değil: pip install pypdf"}
 
     try:
         size = os.path.getsize(path)
@@ -50,9 +51,52 @@ def extract_from_pdf(path: str) -> dict:
         total_pages = len(reader.pages)
         parts = [(page.extract_text() or "") for page in reader.pages]
         text = "\n".join(parts)
-        return {"success": True, "text": text, "page_count": total_pages}
+        return {"success": True, "text": text, "kind": "pdf", "unit_count": total_pages, "unit_label": "sayfa"}
     except Exception as e:
-        return {"success": False, "error": f"PDF parsing failed: {e}"}
+        return {"success": False, "error": f"PDF ayrıştırma hatası: {e}"}
+
+
+def extract_from_xlsx(path: str) -> dict:
+    """XLSX'ten metin çıkarır (tüm sayfalar/satırlar birleştirilir)."""
+    try:
+        import openpyxl
+    except ImportError:
+        return {"success": False, "error": "openpyxl kurulu değil: pip install openpyxl"}
+
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        return {"success": False, "error": f"Dosya bulunamadı: {e}"}
+
+    if size > MAX_FILE_SIZE:
+        limit_mb = MAX_FILE_SIZE // 1024 // 1024
+        return {"success": False, "error": f"Dosya {limit_mb}MB çıkarım sınırını aşıyor"}
+
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        parts = []
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None and str(c).strip()]
+                if cells:
+                    parts.append("\t".join(cells))
+        wb.close()
+        text = "\n".join(parts)
+        sheet_count = len(wb.sheetnames)
+        return {"success": True, "text": text, "kind": "xlsx", "unit_count": sheet_count, "unit_label": "sayfa (sekme)"}
+    except Exception as e:
+        return {"success": False, "error": f"XLSX ayrıştırma hatası: {e}"}
+
+
+def extract_text(path: str) -> dict:
+    """Dosya uzantısına göre uygun çıkarıcıyı seçer."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return extract_from_pdf(path)
+    elif ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+        return extract_from_xlsx(path)
+    else:
+        return {"success": False, "error": f"Desteklenmeyen dosya türü: '{ext}'. Desteklenenler: .pdf, .xlsx"}
 
 
 # 1. TOKENIZER — sayısal-değer koruyan tokenizer'ı
@@ -220,17 +264,17 @@ def main():
     if len(sys.argv) == 3:
         name_a, name_b = sys.argv[1], sys.argv[2]
     else:
-        name_a, name_b = "657_BilimTeknik_tum.pdf", "halit-celenk-hukuk-yazilari.pdf"
+        name_a, name_b = "excelFormattedDocsTesting__PortalAdmin_Uploads_Content_FastAccess_63bbb3a921784.xlsx", "excelFormattedDocsTesting__PortalAdmin_Uploads_Content_FastAccess_76ec4bd052066.xlsx"
 
     path_a = name_a if os.path.isabs(name_a) else os.path.join(script_dir, name_a)
     path_b = name_b if os.path.isabs(name_b) else os.path.join(script_dir, name_b)
 
     print(f">> Karşılaştırılıyor:\n   A = {path_a}\n   B = {path_b}\n")
 
-    # --- AŞAMA 1: PDF okuma ---
+    # --- AŞAMA 1: Metin çıkarma ---
     t0 = time.perf_counter()
-    r1 = extract_from_pdf(path_a)
-    r2 = extract_from_pdf(path_b)
+    r1 = extract_text(path_a)
+    r2 = extract_text(path_b)
     t_extract = time.perf_counter() - t0
 
     if not r1["success"]:
@@ -240,8 +284,8 @@ def main():
         print(f"HATA — {name_b}: {r2['error']}")
         return
 
-    print(f"   {name_a}: {r1['page_count']} sayfa okundu")
-    print(f"   {name_b}: {r2['page_count']} sayfa okundu\n")
+    print(f"   {name_a}: {r1['unit_count']} {r1['unit_label']} okundu")
+    print(f"   {name_b}: {r2['unit_count']} {r2['unit_label']} okundu\n")
 
     # --- AŞAMA 2: Karşılaştırma ---
     t0 = time.perf_counter()
@@ -250,7 +294,7 @@ def main():
 
     _print_report(result)
 
-    print(f"\n  PDF okuma süresi    : {t_extract:.3f} sn")
+    print(f"\n  Dosya okuma süresi  : {t_extract:.3f} sn")
     print(f"  Karşılaştırma süresi: {t_compare:.3f} sn")
     print(f"  Toplam              : {t_extract + t_compare:.3f} sn")
 
