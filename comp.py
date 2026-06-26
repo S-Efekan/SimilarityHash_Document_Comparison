@@ -100,10 +100,25 @@ def extract_text(path: str) -> dict:
 
 
 # 1. TOKENIZER — sayısal-değer koruyan tokenizer'ı
+_NUMERIC_RE = re.compile(r'^\d+(?:[.,]\d+)*$')
+
+
 def tokenize(text: str, min_length: int = 2) -> list[str]:
     """Sayısal değerleri (15.661, 37,786) koruyarak token'lara böler."""
     tokens = re.findall(r'[a-zA-Z0-9]+(?:[.,][0-9]+)*', text.lower())
     return [t for t in tokens if len(t) >= min_length]
+
+
+def _apply_numeric_weight(tokens: list[str], weight: int) -> list[str]:
+    """Sayısal token'ları `weight` kez tekrar ederek SimHash'teki ağırlıklarını artırır."""
+    if weight <= 1:
+        return tokens
+    result = []
+    for t in tokens:
+        result.append(t)
+        if _NUMERIC_RE.match(t):
+            result.extend([t] * (weight - 1))
+    return result
 
 
 # 2. SHINGLE — ardışık kelime gruplarını (n-gram) üret
@@ -221,11 +236,13 @@ def compare_documents(
     chunk_size: int = 150,
     overlap: int = 120,
     ngram: int = NGRAM,
+    numeric_weight: int = 1,
 ) -> dict:
     """İki dokümanı shingle + chunk-bazlı sampling ile karşılaştırır."""
-    # tokenize -> shingle  (tokenizer korunuyor, üstüne n-gram ekleniyor)
-    feats_a = make_shingles(tokenize(text_a), ngram)
-    feats_b = make_shingles(tokenize(text_b), ngram)
+    tokens_a = _apply_numeric_weight(tokenize(text_a), numeric_weight)
+    tokens_b = _apply_numeric_weight(tokenize(text_b), numeric_weight)
+    feats_a = make_shingles(tokens_a, ngram)
+    feats_b = make_shingles(tokens_b, ngram)
 
     chunks_a = chunk_features(feats_a, chunk_size, overlap)
     chunks_b = chunk_features(feats_b, chunk_size, overlap)
@@ -264,7 +281,7 @@ def main():
     if len(sys.argv) == 3:
         name_a, name_b = sys.argv[1], sys.argv[2]
     else:
-        name_a, name_b = "excelFormattedDocsTesting__PortalAdmin_Uploads_Content_FastAccess_63bbb3a921784.xlsx", "excelFormattedDocsTesting__PortalAdmin_Uploads_Content_FastAccess_76ec4bd052066.xlsx"
+        name_a, name_b = "2025_10H_S641EİB.xlsx", "2025_11H_S642EİB.xlsx"
 
     path_a = name_a if os.path.isabs(name_a) else os.path.join(script_dir, name_a)
     path_b = name_b if os.path.isabs(name_b) else os.path.join(script_dir, name_b)
@@ -288,12 +305,18 @@ def main():
     print(f"   {name_b}: {r2['unit_count']} {r2['unit_label']} okundu\n")
 
     # --- AŞAMA 2: Karşılaştırma ---
+    # XLSX dosyalarında sayısal verilerin ağırlığını artır, n-gram'ı küçült
+    is_xlsx = r1["kind"] == "xlsx" or r2["kind"] == "xlsx"
+    cmp_kwargs = {"ngram": 1, "numeric_weight": 4} if is_xlsx else {}
+
     t0 = time.perf_counter()
-    result = compare_documents(r1["text"], r2["text"])
+    result = compare_documents(r1["text"], r2["text"], **cmp_kwargs)
     t_compare = time.perf_counter() - t0
 
     _print_report(result)
 
+    if is_xlsx:
+        print(f"  [Mod: xlsx — n-gram=1, sayısal ağırlık=4x]")
     print(f"\n  Dosya okuma süresi  : {t_extract:.3f} sn")
     print(f"  Karşılaştırma süresi: {t_compare:.3f} sn")
     print(f"  Toplam              : {t_extract + t_compare:.3f} sn")
